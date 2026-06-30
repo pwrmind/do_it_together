@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Семейный Мессенджер-Планировщик</title>
+  <style>
+    :root {
+      --bg-main: #141923;
+      --bg-card: #1f2633;
+      --bg-hover: rgba(255,255,255,0.05);
+      --border-color: #2d3748;
+      --text-main: #e2e8f0;
+      --text-muted: #a0aec0;
+      --color-primary: #3182ce;
+      --color-primary-hover: #2b6cb0;
+      --color-success: #48bb78;
+      --shadow: 0 8px 16px rgba(0,0,0,0.3);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 0;
+      background: var(--bg-main);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .app-header {
+      background: var(--bg-card);
+      position: sticky; top: 0; z-index: 100;
+      display: flex; justify-content: center; gap: 8px;
+      padding: 12px;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .nav-btn {
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 14px;
+      padding: 8px 16px;
+      border-radius: 12px;
+      transition: all 0.2s ease;
+      cursor: pointer;
+      background: none;
+      border: none;
+    }
+    .nav-btn:hover { color: var(--text-main); background: var(--bg-hover); }
+    .nav-btn.active { color: #fff; background: var(--color-primary); }
+    .app-content {
+      max-width: 500px;
+      margin: 0 auto;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+
+  <header class="app-header" id="main-nav">
+    <button class="nav-btn active" data-page="/">📅 Задачи</button>
+    <button class="nav-btn" data-page="/match">🔥 Мэтчинг</button>
+    <button class="nav-btn" data-page="/hub">💬 Доступ</button>
+  </header>
+
+  <main class="app-content" id="app-root"></main>
+
+  <script>
+    // ============================================================
+    // 1. ХРАНИЛИЩЕ (RichStore)
+    // ============================================================
+    class RichStore {
+      constructor(storageKey, defaultState) {
+        this.storageKey = storageKey;
+        this.subscribers = [];
+        const saved = localStorage.getItem(storageKey);
+        const init = saved ? JSON.parse(saved) : defaultState;
+        const self = this;
+        this.state = new Proxy(init, {
+          set(target, prop, val) {
+            target[prop] = val;
+            localStorage.setItem(self.storageKey, JSON.stringify(target));
+            self._notify(prop, val);
+            return true;
+          }
+        });
+      }
+      subscribe(prop, cb) { this.subscribers.push({ prop, cb }); }
+      _notify(prop, val) {
+        this.subscribers.forEach(s => { if (s.prop === prop) s.cb(val); });
+      }
+      addTask(title, assignee = 'Все', dueDate = new Date().toISOString().split('T')[0]) {
+        const task = {
+          id: Date.now(),
+          title,
+          completed: false,
+          assignee,
+          dueDate
+        };
+        this.state.tasks = [...this.state.tasks, task];
+      }
+      toggleTask(id, completed) {
+        this.state.tasks = this.state.tasks.map(t =>
+          t.id === id ? { ...t, completed } : t
+        );
+      }
+      assignTask(id, assignee) {
+        this.state.tasks = this.state.tasks.map(t =>
+          t.id === id ? { ...t, assignee } : t
+        );
+      }
+      addContact(contact) {
+        if (!this.state.contacts.some(c => c.id === contact.id)) {
+          this.state.contacts = [...this.state.contacts, contact];
+        }
+      }
+      joinPublicList(list) {
+        if (!this.state.lists.some(l => l.id === list.id)) {
+          this.state.lists = [...this.state.lists, {
+            id: list.id,
+            title: list.title,
+            participantIds: [...list.participantIds, 'me']
+          }];
+        }
+      }
+    }
+
+    const defaultState = {
+      currentUserFilter: 'all',
+      tasks: [
+        { id: 1, title: 'Купить зелёный горошек', completed: false, assignee: 'Люба', dueDate: '2026-06-30' },
+        { id: 2, title: 'Потренироваться в зале', completed: true, assignee: 'Саша', dueDate: '2026-06-30' },
+        { id: 3, title: 'Заказать пиццу', completed: false, assignee: 'Все', dueDate: '2026-06-30' },
+        { id: 4, title: 'Позвонить маме', completed: false, assignee: 'Люба', dueDate: '2026-06-30' }
+      ],
+      contacts: [
+        { id: 'u1', name: 'Люба (Жена)', avatar: '👧' },
+        { id: 'u2', name: 'Артём (Сын)', avatar: '👶' }
+      ],
+      lists: [
+        { id: 'l1', title: 'Продукты домой', participantIds: ['u1', 'u2'] }
+      ],
+      globalSearch: {
+        users: [
+          { id: 'u_run1', name: 'Олег (Бег)', avatar: '🏃', info: 'Бегаю в парке по утрам' }
+        ],
+        publicLists: [
+          { id: 'l_run', title: '🏃‍♂️ Бег / Хамовники', tags: ['#бег'], participantIds: ['u_run1'], description: 'Совместные пробежки в мегаполисе.' }
+        ]
+      }
+    };
+    window.appStore = new RichStore('family_planner_v8', defaultState);
+
+    // ============================================================
+    // 2. БАЗОВЫЕ АТОМЫ
+    // ============================================================
+    customElements.define('rich-list-item', class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            .wrapper { display: flex; align-items: center; padding: 12px; border-radius: 16px; transition: background 0.2s; }
+            :host(:not([type="header"])) .wrapper:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); cursor: pointer; }
+            :host([type="header"]) .wrapper { cursor: default; padding-left: 4px; }
+            .center { flex-grow: 1; margin: 0 14px; display: flex; flex-direction: column; }
+            ::slotted([slot="title"]) { margin: 0; font-size: 16px; font-weight: 600; color: #e2e8f0; }
+            ::slotted([slot="subtitle"]) { margin: 4px 0 0 0; font-size: 13px; color: #a0aec0; }
+          </style>
+          <div class="wrapper">
+            <slot name="left"></slot>
+            <div class="center"><slot name="title"></slot><slot name="subtitle"></slot></div>
+            <slot name="right"></slot>
+          </div>
+        `;
+      }
+    });
+
+    customElements.define('rich-avatar', class extends HTMLElement {
+      static get observedAttributes() { return ['text', 'color']; }
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            .circle {
+              width: 38px; height: 38px; border-radius: 50%;
+              background: var(--ac, #4a5568);
+              display: flex; align-items: center; justify-content: center;
+              font-size: 16px; user-select: none;
+              transition: transform 0.2s;
+            }
+            .circle:hover { transform: scale(1.06); }
+          </style>
+          <div class="circle" id="c"></div>
+        `;
+      }
+      attributeChangedCallback(n, o, v) {
+        if (n === 'text') this.shadowRoot.getElementById('c').textContent = v;
+        if (n === 'color') this.shadowRoot.getElementById('c').style.setProperty('--ac', v);
+      }
+    });
+
+    customElements.define('rich-checkbox', class extends HTMLElement {
+      static get observedAttributes() { return ['checked']; }
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            .box {
+              width: 24px; height: 24px;
+              border: 2px solid #4a5568;
+              border-radius: 8px;
+              display: flex; align-items: center; justify-content: center;
+              transition: all 0.2s;
+              cursor: pointer;
+            }
+            :host([checked]) .box {
+              background: var(--color-primary, #3182ce);
+              border-color: var(--color-primary);
+            }
+            .check { color: white; font-size: 14px; display: none; font-weight: bold; }
+            :host([checked]) .check { display: block; }
+          </style>
+          <div class="box" id="b"><span class="check">✓</span></div>
+        `;
+      }
+      connectedCallback() {
+        this.shadowRoot.getElementById('b').addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.checked = !this.checked;
+          this.dispatchEvent(new CustomEvent('rich-change', {
+            detail: { checked: this.checked },
+            bubbles: true,
+            composed: true
+          }));
+        });
+      }
+      get checked() { return this.hasAttribute('checked'); }
+      set checked(v) { v ? this.setAttribute('checked', '') : this.removeAttribute('checked'); }
+    });
+
+    customElements.define('rich-input', class extends HTMLElement {
+      static get observedAttributes() { return ['label']; }
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            .w { position: relative; width: 100%; }
+            input {
+              width: 100%; padding: 12px;
+              background: #2d3748; border: 2px solid transparent;
+              border-radius: 12px; color: #fff; font-size: 15px;
+              outline: none; box-sizing: border-box;
+              transition: border 0.2s;
+            }
+            input:focus { border-color: var(--color-primary); }
+          </style>
+          <div class="w"><input type="text" id="i" placeholder=" " /></div>
+        `;
+        this.input = this.shadowRoot.getElementById('i');
+      }
+      connectedCallback() {
+        this.input.addEventListener('input', () => {
+          this.dispatchEvent(new CustomEvent('app-input', {
+            detail: { value: this.input.value, isValid: true },
+            bubbles: true,
+            composed: true
+          }));
+        });
+      }
+      get value() { return this.input.value; }
+      set value(v) { this.input.value = v; }
+      attributeChangedCallback(n, o, v) {
+        if (n === 'label') this.input.setAttribute('placeholder', v);
+      }
+    });
+
+    customElements.define('rich-button', class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            button {
+              background: var(--bg-btn, var(--color-primary));
+              color: white; border: none;
+              padding: 12px 20px; font-weight: 600;
+              border-radius: 12px; cursor: pointer;
+              transition: background 0.2s; font-size: 14px;
+              white-space: nowrap;
+            }
+            button:hover { background: var(--color-primary-hover); }
+          </style>
+          <button><slot></slot></button>
+        `;
+      }
+    });
+
+    customElements.define('rich-popover', class extends HTMLElement {
+      static get observedAttributes() { return ['opened']; }
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host { display: inline-block; position: relative; }
+            .content {
+              position: fixed;
+              z-index: 9999;
+              background: #1f2633;
+              border: 1px solid var(--border-color);
+              border-radius: 12px;
+              box-shadow: var(--shadow);
+              display: none;
+              opacity: 0;
+              transform: scale(0.95);
+              transition: opacity 0.15s, transform 0.15s;
+              padding: 8px;
+              min-width: 140px;
+            }
+            :host([opened]) .content {
+              display: block;
+              opacity: 1;
+              transform: scale(1);
+            }
+          </style>
+          <div id="trigger"><slot name="trigger"></slot></div>
+          <div class="content" id="content"><slot name="content"></slot></div>
+        `;
+        this.trigger = this.shadowRoot.getElementById('trigger');
+        this.content = this.shadowRoot.getElementById('content');
+        this._boundClick = this._handleOutsideClick.bind(this);
+      }
+      connectedCallback() {
+        this.trigger.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.opened = !this.opened;
+        });
+      }
+      get opened() { return this.hasAttribute('opened'); }
+      set opened(v) {
+        if (v) {
+          this.setAttribute('opened', '');
+          document.body.appendChild(this.content);
+          this._position();
+          setTimeout(() => document.addEventListener('click', this._boundClick), 0);
+        } else {
+          this.removeAttribute('opened');
+          this.shadowRoot.appendChild(this.content);
+          document.removeEventListener('click', this._boundClick);
+        }
+      }
+      _position() {
+        const rect = this.trigger.getBoundingClientRect();
+        const cRect = this.content.getBoundingClientRect();
+        let top = rect.bottom + 8;
+        let left = rect.left;
+        if (top + cRect.height > window.innerHeight) {
+          top = rect.top - cRect.height - 8;
+        }
+        if (left + cRect.width > window.innerWidth) {
+          left = window.innerWidth - cRect.width - 16;
+        }
+        if (left < 16) left = 16;
+        this.content.style.top = top + 'px';
+        this.content.style.left = left + 'px';
+      }
+      _handleOutsideClick(e) {
+        if (!this.content.contains(e.target) && !this.trigger.contains(e.target)) {
+          this.opened = false;
+        }
+      }
+    });
+
+    // ============================================================
+    // 3. МОЛЕКУЛЫ
+    // ============================================================
+    customElements.define('rich-calendar-ribbon', class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host { display: block; background: var(--bg-card); padding: 8px 0; border-radius: 16px; margin-bottom: 16px; }
+            .scroller {
+              display: flex;
+              overflow-x: auto;
+              scroll-behavior: smooth;
+              padding: 0 12px;
+              gap: 8px;
+            }
+            .scroller::-webkit-scrollbar { display: none; }
+            .day {
+              flex: 0 0 50px;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              padding: 8px 0;
+              border-radius: 12px;
+              cursor: pointer;
+              transition: all 0.2s;
+              background: transparent;
+              color: var(--text-muted);
+            }
+            .day:hover { background: var(--bg-hover); }
+            .day.selected {
+              background: var(--color-primary);
+              color: #fff;
+              transform: scale(1.05);
+            }
+            .day .wd { font-size: 11px; text-transform: uppercase; opacity: 0.7; }
+            .day .num { font-size: 18px; font-weight: bold; }
+            .day .dots { display: flex; gap: 3px; margin-top: 4px; }
+            .day .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--color-success); opacity: 0.4; }
+            .day .dot.done { opacity: 1; }
+          </style>
+          <div class="scroller" id="scroller"></div>
+        `;
+        this.scroller = this.shadowRoot.getElementById('scroller');
+        this.currentDate = new Date();
+        this.selectedDate = this._toStr(this.currentDate);
+        this.stats = {};
+      }
+      connectedCallback() {
+        this._render();
+        this.scroller.addEventListener('click', (e) => {
+          const day = e.target.closest('.day');
+          if (day) {
+            this.selectedDate = day.dataset.date;
+            this._render();
+            this.dispatchEvent(new CustomEvent('date-select', {
+              detail: { date: this.selectedDate },
+              bubbles: true,
+              composed: true
+            }));
+          }
+        });
+        window.appStore.subscribe('tasks', () => {
+          this._updateStats();
+          this._render();
+        });
+        this._updateStats();
+      }
+      _toStr(d) { return d.toISOString().split('T')[0]; }
+      _updateStats() {
+        const tasks = window.appStore.state.tasks;
+        this.stats = {};
+        tasks.forEach(t => {
+          if (t.completed && t.dueDate) {
+            this.stats[t.dueDate] = (this.stats[t.dueDate] || 0) + 1;
+          }
+        });
+      }
+      _render() {
+        this.scroller.innerHTML = '';
+        const weekdays = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+        const today = new Date();
+        for (let i = -7; i <= 14; i++) {
+          const d = new Date();
+          d.setDate(today.getDate() + i);
+          const ds = this._toStr(d);
+          const dayEl = document.createElement('div');
+          dayEl.className = 'day' + (ds === this.selectedDate ? ' selected' : '');
+          dayEl.dataset.date = ds;
+          dayEl.innerHTML = `
+            <span class="wd">${weekdays[d.getDay()]}</span>
+            <span class="num">${d.getDate()}</span>
+            <div class="dots">
+              ${this.stats[ds] ? '<span class="dot done"></span>' : '<span class="dot"></span>'}
+            </div>
+          `;
+          this.scroller.appendChild(dayEl);
+        }
+        const selectedEl = this.scroller.querySelector('.day.selected');
+        if (selectedEl) selectedEl.scrollIntoView({ behavior: 'auto', inline: 'center' });
+      }
+    });
+
+    customElements.define('rich-member-filter', class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host { display: block; margin: 12px 0; }
+            .container { display: flex; gap: 10px; flex-wrap: wrap; }
+            .chip {
+              padding: 6px 14px;
+              background: var(--bg-card);
+              border: 2px solid transparent;
+              border-radius: 20px;
+              color: var(--text-muted);
+              cursor: pointer;
+              font-size: 14px;
+              transition: all 0.2s;
+            }
+            .chip:hover { background: var(--bg-hover); }
+            .chip.active {
+              background: var(--color-primary);
+              color: #fff;
+              border-color: var(--color-primary);
+            }
+          </style>
+          <div class="container" id="container"></div>
+        `;
+        this.container = this.shadowRoot.getElementById('container');
+      }
+      connectedCallback() {
+        this._render();
+        this.container.addEventListener('click', (e) => {
+          const chip = e.target.closest('.chip');
+          if (chip) {
+            window.appStore.state.currentUserFilter = chip.dataset.filter;
+            this._render();
+          }
+        });
+        window.appStore.subscribe('contacts', () => this._render());
+        window.appStore.subscribe('currentUserFilter', () => this._render());
+      }
+      _render() {
+        this.container.innerHTML = '';
+        const filter = window.appStore.state.currentUserFilter;
+        const contacts = window.appStore.state.contacts;
+        const allChip = document.createElement('div');
+        allChip.className = 'chip' + (filter === 'all' ? ' active' : '');
+        allChip.dataset.filter = 'all';
+        allChip.textContent = '👥 Все';
+        this.container.appendChild(allChip);
+        contacts.forEach(c => {
+          const chip = document.createElement('div');
+          chip.className = 'chip' + (filter === c.id ? ' active' : '');
+          chip.dataset.filter = c.id;
+          chip.textContent = c.avatar + ' ' + c.name;
+          this.container.appendChild(chip);
+        });
+      }
+    });
+
+    // ============================================================
+    // 4. ОРГАНИЗМЫ (страницы)
+    // ============================================================
+
+    // ----- ФОРМА ДОБАВЛЕНИЯ (теперь учитывает атрибут due-date) -----
+    customElements.define('rich-task-form', class extends HTMLElement {
+      static get observedAttributes() { return ['due-date']; }
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>.row { display: flex; gap: 10px; margin-bottom: 16px; }</style>
+          <div class="row">
+            <rich-input id="inp" label="Что нужно сделать?" style="flex-grow: 1;"></rich-input>
+            <rich-button id="btn">Добавить</rich-button>
+          </div>
+        `;
+      }
+      connectedCallback() {
+        this.shadowRoot.getElementById('btn').addEventListener('click', () => {
+          const inp = this.shadowRoot.getElementById('inp');
+          if (inp.value.trim()) {
+            const dueDate = this.getAttribute('due-date') || new Date().toISOString().split('T')[0];
+            window.appStore.addTask(inp.value.trim(), 'Все', dueDate);
+            inp.value = '';
+          }
+        });
+        this.shadowRoot.getElementById('inp').addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') this.shadowRoot.getElementById('btn').click();
+        });
+      }
+    });
+
+    // ----- ЭЛЕМЕНТ ЗАДАЧИ (popover переименован в _popover) -----
+    customElements.define('rich-task-item', class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            .title { color: var(--text-main); font-size: 15px; }
+            :host([completed]) .title { text-decoration: line-through; color: var(--text-muted); opacity: 0.5; }
+            .menu-item { padding: 8px 12px; border-radius: 8px; cursor: pointer; color: #e2e8f0; }
+            .menu-item:hover { background: var(--bg-hover); }
+          </style>
+          <rich-list-item id="root">
+            <rich-checkbox slot="left" id="cb"></rich-checkbox>
+            <div slot="title" class="title" id="title"></div>
+            <rich-popover slot="right" id="popover">
+              <rich-avatar slot="trigger" id="av" text="?" color="#4a5568"></rich-avatar>
+              <div slot="content" id="menu"></div>
+            </rich-popover>
+          </rich-list-item>
+        `;
+        this.cb = this.shadowRoot.getElementById('cb');
+        this.titleEl = this.shadowRoot.getElementById('title');
+        this.av = this.shadowRoot.getElementById('av');
+        this._popover = this.shadowRoot.getElementById('popover');   // ИСПРАВЛЕНИЕ
+        this.menu = this.shadowRoot.getElementById('menu');
+        this._data = null;
+      }
+      set task(data) {
+        this._data = data;
+        this.titleEl.textContent = data.title;
+        if (data.completed) {
+          this.setAttribute('completed', '');
+          this.cb.setAttribute('checked', '');
+        } else {
+          this.removeAttribute('completed');
+          this.cb.removeAttribute('checked');
+        }
+        this._updateAvatar(data.assignee || 'Все');
+        this.menu.innerHTML = '';
+        const all = ['Все', 'Саша', 'Люба'];
+        const contacts = window.appStore.state.contacts;
+        contacts.forEach(c => {
+          if (!all.includes(c.name)) all.push(c.name);
+        });
+        all.forEach(name => {
+          const item = document.createElement('div');
+          item.className = 'menu-item';
+          item.textContent = name;
+          item.addEventListener('click', () => {
+            window.appStore.assignTask(this._data.id, name);
+            this._popover.opened = false;   // ИСПРАВЛЕНИЕ
+          });
+          this.menu.appendChild(item);
+        });
+      }
+      _updateAvatar(assignee) {
+        this.av.setAttribute('text', assignee === 'Все' ? '👥' : assignee.substring(0,2));
+        if (assignee === 'Саша') this.av.setAttribute('color', '#3182ce');
+        else if (assignee === 'Люба') this.av.setAttribute('color', '#ed64a6');
+        else this.av.setAttribute('color', '#4a5568');
+      }
+      connectedCallback() {
+        this.cb.addEventListener('rich-change', (e) => {
+          window.appStore.toggleTask(this._data.id, e.detail.checked);
+        });
+      }
+    });
+
+    // ----- ГЛАВНАЯ ДОСКА ЗАДАЧ (теперь с календарём) -----
+    customElements.define('rich-task-board', class extends HTMLElement {
+      constructor() { 
+        super(); 
+        this.attachShadow({ mode: 'open' });
+        this.selectedDate = new Date().toISOString().split('T')[0]; // по умолчанию сегодня
+      }
+      
+      connectedCallback() {
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host { display: block; }
+            .section-wrapper { margin-bottom: 16px; }
+            .tasks-container { display: flex; flex-direction: column; }
+          </style>
+          <rich-calendar-ribbon id="calendar"></rich-calendar-ribbon>
+          <rich-task-form id="form"></rich-task-form>
+          <rich-member-filter></rich-member-filter>
+          <div id="list"></div>
+        `;
+        this.list = this.shadowRoot.getElementById('list');
+        this.form = this.shadowRoot.getElementById('form');
+        this.calendar = this.shadowRoot.getElementById('calendar');
+
+        // Связываем календарь с формой
+        this.calendar.addEventListener('date-select', (e) => {
+          this.selectedDate = e.detail.date;
+          this.form.setAttribute('due-date', this.selectedDate);
+        });
+        // Устанавливаем начальную дату
+        this.form.setAttribute('due-date', this.selectedDate);
+
+        window.appStore.subscribe('tasks', () => this.render());
+        window.appStore.subscribe('currentUserFilter', () => this.render());
+        
+        this.render();
+      }
+      
+      render() {
+        this.list.innerHTML = '';
+        
+        const tasks = window.appStore.state.tasks;
+        const currentFilter = window.appStore.state.currentUserFilter;
+        
+        const filteredTasks = tasks.filter(t => currentFilter === 'all' || t.assignee === currentFilter);
+
+        const sections = { 
+          'СЕГОДНЯ': [], 
+          'ЗАВТРА': [], 
+          'НА НЕДЕЛЕ': [], 
+          'ПОЗЖЕ': [] 
+        };
+        
+        const now = new Date();
+        const todayStr = now.toISOString().split('T')[0];
+        const tomorrow = new Date();
+        tomorrow.setDate(now.getDate() + 1);
+        const tomorrowStr = tomorrow.toISOString().split('T')[0];
+        const weekLater = new Date();
+        weekLater.setDate(now.getDate() + 7);
+        const weekLaterStr = weekLater.toISOString().split('T')[0];
+
+        filteredTasks.forEach(task => {
+          const due = task.dueDate || todayStr;
+          if (due === todayStr) {
+            sections['СЕГОДНЯ'].push(task);
+          } else if (due === tomorrowStr) {
+            sections['ЗАВТРА'].push(task);
+          } else if (due > tomorrowStr && due <= weekLaterStr) {
+            sections['НА НЕДЕЛЕ'].push(task);
+          } else {
+            sections['ПОЗЖЕ'].push(task);
+          }
+        });
+
+        Object.keys(sections).forEach(title => {
+          const sectionTasks = sections[title];
+          
+          const sectionWrapper = document.createElement('div');
+          sectionWrapper.className = 'section-wrapper';
+
+          const sectionHeader = document.createElement('rich-list-item');
+          sectionHeader.setAttribute('type', 'header');
+          
+          const headerTitle = document.createElement('div');
+          headerTitle.setAttribute('slot', 'title');
+          headerTitle.style.cssText = "color: #3182ce; font-weight: bold; font-size: 13px; letter-spacing: 0.5px;";
+          headerTitle.textContent = title;
+          
+          const badge = document.createElement('div');
+          badge.setAttribute('slot', 'right');
+          badge.style.cssText = "background: #2d3748; color: #a0aec0; font-size: 12px; padding: 2px 8px; border-radius: 10px; font-weight: bold;";
+          badge.textContent = sectionTasks.length;
+
+          sectionHeader.appendChild(headerTitle);
+          sectionHeader.appendChild(badge);
+          sectionWrapper.appendChild(sectionHeader);
+
+          const tasksContainer = document.createElement('div');
+          tasksContainer.className = 'tasks-container';
+
+          if (sectionTasks.length === 0) {
+            const emptyRow = document.createElement('rich-list-item');
+            emptyRow.setAttribute('type', 'header');
+            const emptyText = document.createElement('div');
+            emptyText.setAttribute('slot', 'title');
+            emptyText.style.cssText = "color: #4a5568; font-size: 14px; font-style: italic;";
+            emptyText.textContent = "Нет задач";
+            emptyRow.appendChild(emptyText);
+            tasksContainer.appendChild(emptyRow);
+          } else {
+            sectionTasks.forEach(t => {
+              const item = document.createElement('rich-task-item');
+              item.task = t;
+              tasksContainer.appendChild(item);
+            });
+          }
+          
+          sectionWrapper.appendChild(tasksContainer);
+          this.list.appendChild(sectionWrapper);
+        });
+      }
+    });
+
+    // Остальные страницы без изменений
+    customElements.define('rich-match-zone', class extends HTMLElement {
+      constructor() { super(); this.attachShadow({ mode: 'open' }); }
+      connectedCallback() {
+        this.shadowRoot.innerHTML = `
+          <style>
+            .zone {
+              height: 350px;
+              background: var(--bg-card);
+              border-radius: 24px;
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              justify-content: center;
+              text-align: center;
+              border: 2px dashed var(--border-color);
+              padding: 20px;
+              margin-top: 16px;
+            }
+            .emoji { font-size: 48px; margin-bottom: 12px; }
+            .buttons { display: flex; gap: 20px; margin-top: 16px; }
+          </style>
+          <div class="zone">
+            <div class="emoji">🎬</div>
+            <h3>Посмотреть фильм "Интерстеллар"</h3>
+            <p style="color: var(--text-muted); font-size: 14px;">Свайпните вправо, если согласны</p>
+            <div class="buttons">
+              <rich-button style="--bg-btn: #e53e3e;" id="dislike">❌ Нет</rich-button>
+              <rich-button style="--bg-btn: #48bb78;" id="like">❤️ Да!</rich-button>
+            </div>
+          </div>
+        `;
+        this.shadowRoot.getElementById('like').addEventListener('click', () => {
+          alert('🔥 МЭТЧ! Фильм добавлен в задачи.');
+          window.appStore.addTask('Посмотреть "Интерстеллар" вместе', 'Все');
+        });
+        this.shadowRoot.getElementById('dislike').addEventListener('click', () => {
+          alert('Пропущено.');
+        });
+      }
+    });
+
+    customElements.define('rich-hub-zone', class extends HTMLElement {
+      constructor() { super(); this.attachShadow({ mode: 'open' }); }
+      connectedCallback() {
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host { display: block; padding: 12px 0; }
+            .section-wrapper { margin-bottom: 24px; }
+            .card-container { display: flex; flex-direction: column; }
+          </style>
+          <div class="section-wrapper">
+            <rich-list-item type="header">
+              <div slot="title" style="color: #63b3ed; font-size: 13px; text-transform: uppercase; font-weight: bold;">Ваши общие списки</div>
+            </rich-list-item>
+            <div class="card-container" id="chats-container"></div>
+          </div>
+          <div class="section-wrapper">
+            <rich-list-item type="header">
+              <div slot="title" style="color: #63b3ed; font-size: 13px; text-transform: uppercase; font-weight: bold;">Ваша книга контактов</div>
+            </rich-list-item>
+            <div class="card-container" id="contacts-container"></div>
+          </div>
+          <div class="section-wrapper" style="padding: 0 12px;">
+            <rich-list-item type="header">
+              <div slot="title" style="color: #a0aec0; font-size: 13px; text-transform: uppercase; font-weight: bold;">Поиск компаний в мегаполисе</div>
+            </rich-list-item>
+            <rich-input id="search-input" label="Введите тег, например: #бег"></rich-input>
+            <div class="card-container" id="search-results" style="margin-top: 12px;"></div>
+          </div>
+        `;
+        this.chatsContainer = this.shadowRoot.getElementById('chats-container');
+        this.contactsContainer = this.shadowRoot.getElementById('contacts-container');
+        this.searchResults = this.shadowRoot.getElementById('search-results');
+        this.shadowRoot.getElementById('search-input').addEventListener('app-input', (e) => this.search(e.detail.value));
+        window.appStore.subscribe('contacts', () => this.renderListsAndContacts());
+        window.appStore.subscribe('lists', () => this.renderListsAndContacts());
+        this.renderListsAndContacts();
+      }
+      renderListsAndContacts() {
+        const store = window.appStore.state;
+        this.chatsContainer.innerHTML = '';
+        store.lists.forEach(list => {
+          const names = list.participantIds.map(id => store.contacts.find(c => c.id === id)?.name || 'Вы').join(', ');
+          const row = document.createElement('rich-list-item');
+          const avatar = document.createElement('rich-avatar');
+          avatar.setAttribute('slot', 'left');
+          avatar.setAttribute('text', '💬');
+          avatar.setAttribute('color', '#2d3748');
+          const title = document.createElement('div');
+          title.setAttribute('slot', 'title');
+          title.textContent = list.title;
+          const subtitle = document.createElement('div');
+          subtitle.setAttribute('slot', 'subtitle');
+          subtitle.textContent = 'Доступ: ' + names;
+          const btn = document.createElement('rich-button');
+          btn.setAttribute('slot', 'right');
+          btn.style.cssText = '--bg-btn: #2d3748; font-size: 12px; padding: 6px 12px;';
+          btn.textContent = '+ Участник';
+          btn.addEventListener('click', () => alert('Функция добавления участника будет реализована позже.'));
+          row.appendChild(avatar);
+          row.appendChild(title);
+          row.appendChild(subtitle);
+          row.appendChild(btn);
+          this.chatsContainer.appendChild(row);
+        });
+        this.contactsContainer.innerHTML = '';
+        store.contacts.forEach(contact => {
+          const row = document.createElement('rich-list-item');
+          const avatar = document.createElement('rich-avatar');
+          avatar.setAttribute('slot', 'left');
+          avatar.setAttribute('text', contact.avatar);
+          avatar.setAttribute('color', contact.name.includes('Жена') ? '#ed64a6' : '#3182ce');
+          const title = document.createElement('div');
+          title.setAttribute('slot', 'title');
+          title.textContent = contact.name;
+          const subtitle = document.createElement('div');
+          subtitle.setAttribute('slot', 'subtitle');
+          subtitle.textContent = 'В сети';
+          row.appendChild(avatar);
+          row.appendChild(title);
+          row.appendChild(subtitle);
+          this.contactsContainer.appendChild(row);
+        });
+      }
+      search(val) {
+        this.searchResults.innerHTML = '';
+        if (!val.toLowerCase().includes('#бег')) return;
+        const row = document.createElement('rich-list-item');
+        const avatar = document.createElement('rich-avatar');
+        avatar.setAttribute('slot', 'left');
+        avatar.setAttribute('text', '🏃‍♂️');
+        avatar.setAttribute('color', '#4a5568');
+        const title = document.createElement('div');
+        title.setAttribute('slot', 'title');
+        title.textContent = 'Бег / Хамовники';
+        const subtitle = document.createElement('div');
+        subtitle.setAttribute('slot', 'subtitle');
+        subtitle.textContent = 'Группа совместных пробежек по утрам';
+        const btn = document.createElement('rich-button');
+        btn.setAttribute('slot', 'right');
+        btn.textContent = 'Вступить';
+        btn.addEventListener('click', () => alert('Вы успешно вступили в беговой клуб! Задачи добавлены на главную.'));
+        row.appendChild(avatar);
+        row.appendChild(title);
+        row.appendChild(subtitle);
+        row.appendChild(btn);
+        this.searchResults.appendChild(row);
+      }
+    });
+
+    // ============================================================
+    // 5. ХЕШ-РОУТЕР
+    // ============================================================
+    class RichRouter {
+      constructor(rootElement) {
+        this.root = rootElement;
+        this.routes = {
+          '/': 'rich-task-board',
+          '/match': 'rich-match-zone',
+          '/hub': 'rich-hub-zone'
+        };
+        window.addEventListener('hashchange', () => this.route());
+        document.querySelectorAll('[data-page]').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const page = btn.dataset.page;
+            window.location.hash = page;
+            this.updateNav(page);
+          });
+        });
+        if (!window.location.hash) window.location.hash = '/';
+        this.route();
+        this.updateNav(window.location.hash.slice(1) || '/');
+      }
+      route() {
+        const path = window.location.hash.slice(1) || '/';
+        const tag = this.routes[path] || 'rich-task-board';
+        this.root.innerHTML = '';
+        const el = document.createElement(tag);
+        this.root.appendChild(el);
+      }
+      updateNav(path) {
+        document.querySelectorAll('[data-page]').forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.page === path);
+        });
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const root = document.getElementById('app-root');
+      window.router = new RichRouter(root);
+    });
+  </script>
+</body>
+</html>
